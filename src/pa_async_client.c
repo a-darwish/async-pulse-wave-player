@@ -35,6 +35,7 @@
 struct context {
     pa_mainloop_api *mainloop_api;      /* Pulse abstract mainloop API vtable */
     struct audio_file *file;            /* Audio file buf, size, audio specs, etc. */
+    pa_context *context;                /* PA Connection handle between client & server */
 };
 
 /*
@@ -64,6 +65,7 @@ static void stream_state_callback(pa_stream *stream, void *userdata) {
     struct context *ctx = userdata;
 
     assert(ctx);
+    assert(ctx->context);
 
     switch (pa_stream_get_state(stream)) {
     case PA_STREAM_CREATING:
@@ -71,13 +73,13 @@ static void stream_state_callback(pa_stream *stream, void *userdata) {
         break;
 
     case PA_STREAM_READY:
-        out("Stream succesfully created");
+        out("Playback stream succesfully created");
         break;
 
     case PA_STREAM_FAILED:
     default:
-        error("PulseAudio stream error: %s",
-              pa_strerror(pa_context_errno(pa_stream_get_context(stream))));
+        error("Playback stream error: %s",
+              pa_strerror(pa_context_errno(ctx->context)));
         goto fail;
     }
 
@@ -111,6 +113,7 @@ static void stream_write_callback(pa_stream *stream, size_t length, void *userda
     int ret;
 
     assert(ctx);
+    assert(ctx->context);
     assert((file = ctx->file));
     assert(file->buf);
     assert(file->readi <= file->size);
@@ -126,7 +129,7 @@ static void stream_write_callback(pa_stream *stream, size_t length, void *userda
                           PA_SEEK_RELATIVE);
     if (ret < 0) {
         error("Failed writing audio data to stream: %s",
-              pa_strerror(pa_context_errno(pa_stream_get_context(stream))));
+              pa_strerror(pa_context_errno(ctx->context)));
         goto fail;
     }
 
@@ -155,7 +158,7 @@ static void stream_write_callback(pa_stream *stream, size_t length, void *userda
         operation = pa_stream_drain(stream, stream_drain_complete, ctx);
         if (!operation) {
             error("Could not drain playback stream: %s",
-                  pa_strerror(pa_context_errno(pa_stream_get_context(stream))));
+                  pa_strerror(pa_context_errno(ctx->context)));
             goto fail;
         }
     }
@@ -189,7 +192,7 @@ static void context_state_callback(pa_context *context, void *userdata) {
         break;
 
     case PA_CONTEXT_READY:
-        out("Connection established with PulseAudio server");
+        out("Connection established with PulseAudio sound server");
 
         stream = pa_stream_new(context, "playback stream", &file->spec, NULL);
         if (!stream)
@@ -278,6 +281,7 @@ int main(int argc, char **argv) {
 
     ctx->file = file;
     ctx->mainloop_api = api;
+    ctx->context = context;
     pa_context_set_state_callback(context, context_state_callback, ctx);
 
     ret = pa_context_connect(context, NULL, 0, NULL);

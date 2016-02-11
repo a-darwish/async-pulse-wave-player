@@ -29,6 +29,7 @@
 }
 
 #define out(fmt, ...) {                         \
+    printf("[Info] ");                          \
     printf(fmt "\n", ##__VA_ARGS__);            \
 }
 
