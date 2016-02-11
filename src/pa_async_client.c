@@ -22,6 +22,7 @@
 #include <pulse/mainloop.h>
 #include <pulse/mainloop-api.h>
 #include <pulse/mainloop-signal.h>
+#include <pulse/operation.h>
 #include <pulse/proplist.h>
 #include <pulse/sample.h>
 #include <pulse/stream.h>
@@ -86,11 +87,26 @@ fail:
     quit(ctx, EXIT_FAILURE);
 }
 
-/* Callback to be called whenever new data may be written to the
- * playback data stream */
+/*
+ * Exit the application only after getting a confirmation that
+ * the playback stream has been _fully_ drained. Check
+ * below stream_write_callback() EOF handling for rationale.
+ */
+static void stream_drain_complete(pa_stream*s, int success, void *userdata) {
+    struct context *ctx = userdata;
+
+    out("Playback stream fully drained.. Exiting application");
+    quit(ctx, EXIT_SUCCESS);
+}
+
+/*
+ * Callback to be called whenever new data may be written to the
+ * playback data stream
+ */
 static void stream_write_callback(pa_stream *stream, size_t length, void *userdata) {
     struct context *ctx = userdata;
     struct audio_file *file;
+    struct pa_operation *operation;
     size_t to_write, write_unit;
     int ret;
 
@@ -117,9 +133,31 @@ static void stream_write_callback(pa_stream *stream, size_t length, void *userda
     file->readi += to_write;
     assert(file->readi <= file->size);
 
+    /*
+     * EOF! yay ..
+     *
+     * When reaching audio EOF, do not just close the application!
+     * Doing so leads to losing playback of the latest portion of
+     * the audio file (~ 0.5 seconds). Moreover, it produces ugly,
+     * quite loud, sound cracks :-(
+     *
+     * The playback stream needs to be drained first. Thus close
+     * the application, and the PA event loop, only after getting
+     * a confirmation that the stream drain is complete.
+     */
     if ((file->size - file->readi) < write_unit) {
         out("Success! - Reached end of file");
-        quit(ctx, EXIT_SUCCESS);
+        out("Draining playback stream before exit");
+
+        /* Don't invoke our write callback again */
+        pa_stream_set_write_callback(stream, NULL, NULL);
+
+        operation = pa_stream_drain(stream, stream_drain_complete, ctx);
+        if (!operation) {
+            error("Could not drain playback stream: %s",
+                  pa_strerror(pa_context_errno(pa_stream_get_context(stream))));
+            goto fail;
+        }
     }
 
     return;
