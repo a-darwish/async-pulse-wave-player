@@ -51,7 +51,7 @@ struct audio_file *audio_file_new(char *filepath) {
     struct stat filestat = { 0, };
     struct wave_header *header = NULL;
     pa_sample_format_t sample_format;
-    size_t header_size;
+    size_t header_size, audio_size;
     int fd = -1, ret;
 
     file = malloc(sizeof(struct audio_file));
@@ -102,8 +102,13 @@ struct audio_file *audio_file_new(char *filepath) {
         goto fail;
     }
 
+    /* Guard against corrupted WAV files where the reported audio
+     * data size is much larger than what's really in the file. */
+    audio_size = min((size_t)header->audio_data_size,
+                     (filestat.st_size - header_size));
+
     file->buf = (void *)(header + 1);
-    file->size = header->audio_data_size;
+    file->size = audio_size;
     file->readi = 0;
     file->spec.format = sample_format;
     file->spec.rate = header->frequency;
