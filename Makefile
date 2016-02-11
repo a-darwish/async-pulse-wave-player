@@ -2,11 +2,11 @@
 PULSE_CFLAGS = $(shell pkg-config --cflags libpulse)
 PULSE_LDFLAGS = $(shell pkg-config --libs libpulse)
 
-CFLAGS += -Wall -g $(PULSE_CFLAGS)
+CFLAGS += -Wall -g -I include/ $(PULSE_CFLAGS)
 LDFLAGS += $(PULSE_LDFLAGS)
 
-OBJS = asynchronous-client.o audio_file.o
-PROGRAM = wave-player
+OBJS = src/pa_async_client.o src/audio_file.o
+PROGRAM = wave_player
 
 all: $(PROGRAM)
 
