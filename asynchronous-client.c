@@ -10,8 +10,7 @@
  * This is an as minimal as it can get implementation for the
  * purpose of studying PulseAudio asynchronous APIs.
  *
- * TODO-1: Dynamically extract wave metadata (format, rate, channels)
- * TODO-2: Re-factor
+ * TODO: Re-factor
  */
 
 #include <assert.h>
@@ -19,6 +18,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
 #include <sys/mman.h>
@@ -35,7 +35,7 @@
 #include <pulse/stream.h>
 
 #define __error(fmt, suffix, ...) {             \
-    fprintf(stderr, "Error: ");                 \
+    fprintf(stderr, "[Error] ");                \
     fprintf(stderr, fmt suffix, ##__VA_ARGS__); \
 }
 
@@ -60,22 +60,26 @@
     _m1 < _m2 ? _m1 : _m2;                      \
 })
 
-/*
- * Standard audio data sample specification
- */
-static pa_sample_spec sample_spec = {
-    .format = PA_SAMPLE_S16LE,  /* 2-byte, little-endian, sample */
-    .rate = 44100,              /* 44 Khz */
-    .channels = 2,              /* 2 channels: left, right */
-};
+struct wave_header {
+    char     id[4];             /* "RIFF" */
+    uint8_t  ignored[16];       /* ... */
+    uint16_t audio_format;      /* PCM = 1, else compression used */
+    uint16_t channels;          /* channels count (mono, stereo, ..) */
+    uint32_t frequency;         /* 44KHz? */
+    uint8_t  ignored2[6];       /* ... */
+    uint16_t bits_per_sample;   /* 8 bits, 16 bits, etc. per sample */
+    uint32_t ignored3;          /* ... */
+    uint32_t audio_data_size;   /* nr_samples * bits_per_sample * channels */
+} __attribute__((packed));
 
 /*
  * Book-keeping for the audio file to be played
  */
 struct audio_file {
-    char *buf;                  /* Memory-mapped buffer of file contents */
-    size_t size;                /* File size in bytes */
+    char *buf;                  /* Memory-mapped buffer of file audio data */
+    size_t size;                /* File's audio data size, in bytes */
     size_t readi;               /* Read index; bytes played so far */
+    pa_sample_spec spec;        /* Audio sample format, rate, and channels */
 };
 
 /*
@@ -126,7 +130,7 @@ static void stream_write_callback(pa_stream *stream, size_t length, void *userda
     assert(file->readi <= file->size);
 
     /* Writes must be in multiple of audio sample size * channel count */
-    write_unit = pa_frame_size(&sample_spec);
+    write_unit = pa_frame_size(&file->spec);
 
     to_write = file->size - file->readi;
     to_write = min(length, to_write);
@@ -162,6 +166,7 @@ fail:
  * including data streams , bi-directional commands, and events.
  */
 static void context_state_callback(pa_context *context, void *userdata) {
+    struct audio_file *file = userdata;
     pa_stream *stream;
     int ret;
 
@@ -174,7 +179,7 @@ static void context_state_callback(pa_context *context, void *userdata) {
     case PA_CONTEXT_READY:
         out("Connection established with PulseAudio server");
 
-        stream = pa_stream_new(context, "playback stream", &sample_spec, NULL);
+        stream = pa_stream_new(context, "playback stream", &file->spec, NULL);
         if (!stream)
             goto fail;
 
@@ -208,45 +213,94 @@ fail:
     exit(EXIT_FAILURE);
 }
 
+static pa_sample_format_t bits_per_sample_to_pa_spec_format(int bits) {
+    switch (bits) {
+    case  8: return PA_SAMPLE_U8;
+    case 16: return PA_SAMPLE_S16LE;
+    case 32: return PA_SAMPLE_S16BE;
+    default:
+        error("Unrecognized WAV file with %u bits per sample", bits);
+        exit(EXIT_FAILURE);
+    }
+}
+
+struct audio_file *audio_file_new(char *filepath) {
+    struct audio_file *file;
+    struct stat filestat;
+    struct wave_header *header;
+    size_t header_size;
+    int fd, ret;
+
+    file = malloc(sizeof(struct audio_file));
+    if (!file)
+        goto fail;
+
+    fd = open(filepath, O_RDONLY);
+    if (fd < 0) {
+        errorp("open('%s')", filepath);
+        goto fail;
+    }
+
+    ret = fstat(fd, &filestat);
+    if (ret < 0) {
+        errorp("fstat('%s')", filepath);
+        goto fail;
+    }
+
+    header_size = sizeof(struct wave_header);
+    if (filestat.st_size < header_size) {
+        errorp("Too small file size < WAV header's %lu bytes", header_size);
+        goto fail;
+    }
+
+    header = mmap(NULL, filestat.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (!header) {
+        errorp("mmap('%s')", filepath);
+        goto fail;
+    }
+
+    if (strncmp(header->id, "RIFF", 4)) {
+        error("File '%s' is not a WAV file", filepath);
+        goto fail;
+    }
+
+    if (header->audio_format != 1) {
+        error("Cannot play audio file '%s'", filepath);
+        error("Audio data is not in raw, uncompressed, PCM format");
+        goto fail;
+    }
+
+    file->buf = (void *)(header + 1);
+    file->size = header->audio_data_size;
+    file->readi = 0;
+    file->spec.format = bits_per_sample_to_pa_spec_format(header->bits_per_sample);
+    file->spec.rate = header->frequency;
+    file->spec.channels = header->channels;
+
+    return file;
+
+fail:
+    exit(EXIT_FAILURE);
+}
+
 int main(int argc, char **argv) {
     pa_proplist *proplist = NULL;
     pa_mainloop *m = NULL;
     pa_mainloop_api *api = NULL;
     pa_context *context = NULL;
-    struct audio_file file;
-
-    char *filename;
-    void *filebuf;
-    struct stat filestat;
-    int fd, ret;
+    struct audio_file *file;
+    char *filepath;
+    int ret;
 
     if (argc != 2) {
         error("usage: %s <WAVE-AUDIO-FILE>", argv[0]);
         goto quit;
     }
 
-    filename = argv[1];
-    fd = open(filename, O_RDONLY);
-    if (fd < 0) {
-        errorp("open('%s')", filename);
+    filepath = argv[1];
+    file = audio_file_new(filepath);
+    if (!file)
         goto quit;
-    }
-
-    ret = fstat(fd, &filestat);
-    if (ret < 0) {
-        errorp("fstat('%s')", filename);
-        goto quit;
-    }
-
-    filebuf = mmap(NULL, filestat.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-    if (!filebuf) {
-        errorp("mmap('%s')", filename);
-        goto quit;
-    }
-
-    file.buf = filebuf;
-    file.size = filestat.st_size;
-    file.readi = 0;
 
     proplist = pa_proplist_new();
     if (!proplist) {
@@ -255,7 +309,7 @@ int main(int argc, char **argv) {
     }
 
     pa_proplist_sets(proplist, PA_PROP_APPLICATION_NAME, "sampleClient");
-    pa_proplist_sets(proplist, PA_PROP_MEDIA_NAME, filename);
+    pa_proplist_sets(proplist, PA_PROP_MEDIA_NAME, filepath);
 
     m = pa_mainloop_new();
     if (!m) {
@@ -270,7 +324,7 @@ int main(int argc, char **argv) {
         goto quit;
     }
 
-    pa_context_set_state_callback(context, context_state_callback, &file);
+    pa_context_set_state_callback(context, context_state_callback, file);
 
     ret = pa_context_connect(context, NULL, 0, NULL);
     if (ret < 0) {
