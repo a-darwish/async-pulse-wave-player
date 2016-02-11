@@ -5,13 +5,13 @@ PULSE_LDFLAGS = $(shell pkg-config --libs libpulse)
 CFLAGS += -Wall -g $(PULSE_CFLAGS)
 LDFLAGS += $(PULSE_LDFLAGS)
 
-OBJS = asynchronous-client.o
+OBJS = asynchronous-client.o audio_file.o
 PROGRAM = wave-player
 
 all: $(PROGRAM)
 
 $(PROGRAM): $(OBJS)
-	$(CC) $< -o $@ $(LDFLAGS)
+	$(CC) $^ -o $@ $(LDFLAGS)
 
 .PHONY: clean
 clean:

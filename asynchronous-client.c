@@ -9,21 +9,12 @@
  *
  * This is an as minimal as it can get implementation for the
  * purpose of studying PulseAudio asynchronous APIs.
- *
- * TODO: Re-factor
  */
 
 #include <assert.h>
-#include <fcntl.h>
 #include <stdarg.h>
-#include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <unistd.h>
-
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <sys/types.h>
 
 #include <pulse/context.h>
 #include <pulse/error.h>
@@ -34,53 +25,7 @@
 #include <pulse/sample.h>
 #include <pulse/stream.h>
 
-#define __error(fmt, suffix, ...) {             \
-    fprintf(stderr, "[Error] ");                \
-    fprintf(stderr, fmt suffix, ##__VA_ARGS__); \
-}
-
-#define error(fmt, ...)                         \
-    __error(fmt, "\n", ##__VA_ARGS__);
-
-/* perror, but with printf-like formatting */
-#define errorp(fmt, ...) {                      \
-    __error(fmt, ": ", ##__VA_ARGS__);          \
-    perror("");                                 \
-}
-
-#define out(fmt, ...) {                         \
-    printf(fmt "\n", ##__VA_ARGS__);            \
-}
-
-/* Type-safe min macro */
-#define min(x, y) ({                            \
-    typeof(x) _m1 = (x);                        \
-    typeof(y) _m2 = (y);                        \
-    (void) (&_m1 == &_m2);                      \
-    _m1 < _m2 ? _m1 : _m2;                      \
-})
-
-struct wave_header {
-    char     id[4];             /* "RIFF" */
-    uint8_t  ignored[16];       /* ... */
-    uint16_t audio_format;      /* PCM = 1, else compression used */
-    uint16_t channels;          /* channels count (mono, stereo, ..) */
-    uint32_t frequency;         /* 44KHz? */
-    uint8_t  ignored2[6];       /* ... */
-    uint16_t bits_per_sample;   /* 8 bits, 16 bits, etc. per sample */
-    uint32_t ignored3;          /* ... */
-    uint32_t audio_data_size;   /* nr_samples * bits_per_sample * channels */
-} __attribute__((packed));
-
-/*
- * Book-keeping for the audio file to be played
- */
-struct audio_file {
-    char *buf;                  /* Memory-mapped buffer of file audio data */
-    size_t size;                /* File's audio data size, in bytes */
-    size_t readi;               /* Read index; bytes played so far */
-    pa_sample_spec spec;        /* Audio sample format, rate, and channels */
-};
+#include "common.h"
 
 /*
  * Stream state callbacks
@@ -213,76 +158,6 @@ fail:
     exit(EXIT_FAILURE);
 }
 
-static pa_sample_format_t bits_per_sample_to_pa_spec_format(int bits) {
-    switch (bits) {
-    case  8: return PA_SAMPLE_U8;
-    case 16: return PA_SAMPLE_S16LE;
-    case 32: return PA_SAMPLE_S16BE;
-    default:
-        error("Unrecognized WAV file with %u bits per sample", bits);
-        exit(EXIT_FAILURE);
-    }
-}
-
-struct audio_file *audio_file_new(char *filepath) {
-    struct audio_file *file;
-    struct stat filestat;
-    struct wave_header *header;
-    size_t header_size;
-    int fd, ret;
-
-    file = malloc(sizeof(struct audio_file));
-    if (!file)
-        goto fail;
-
-    fd = open(filepath, O_RDONLY);
-    if (fd < 0) {
-        errorp("open('%s')", filepath);
-        goto fail;
-    }
-
-    ret = fstat(fd, &filestat);
-    if (ret < 0) {
-        errorp("fstat('%s')", filepath);
-        goto fail;
-    }
-
-    header_size = sizeof(struct wave_header);
-    if (filestat.st_size < header_size) {
-        errorp("Too small file size < WAV header's %lu bytes", header_size);
-        goto fail;
-    }
-
-    header = mmap(NULL, filestat.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-    if (!header) {
-        errorp("mmap('%s')", filepath);
-        goto fail;
-    }
-
-    if (strncmp(header->id, "RIFF", 4)) {
-        error("File '%s' is not a WAV file", filepath);
-        goto fail;
-    }
-
-    if (header->audio_format != 1) {
-        error("Cannot play audio file '%s'", filepath);
-        error("Audio data is not in raw, uncompressed, PCM format");
-        goto fail;
-    }
-
-    file->buf = (void *)(header + 1);
-    file->size = header->audio_data_size;
-    file->readi = 0;
-    file->spec.format = bits_per_sample_to_pa_spec_format(header->bits_per_sample);
-    file->spec.rate = header->frequency;
-    file->spec.channels = header->channels;
-
-    return file;
-
-fail:
-    exit(EXIT_FAILURE);
-}
-
 int main(int argc, char **argv) {
     pa_proplist *proplist = NULL;
     pa_mainloop *m = NULL;
@@ -298,6 +173,7 @@ int main(int argc, char **argv) {
     }
 
     filepath = argv[1];
+
     file = audio_file_new(filepath);
     if (!file)
         goto quit;
@@ -308,7 +184,7 @@ int main(int argc, char **argv) {
         goto quit;
     }
 
-    pa_proplist_sets(proplist, PA_PROP_APPLICATION_NAME, "sampleClient");
+    pa_proplist_sets(proplist, PA_PROP_APPLICATION_NAME, "asynchronous-client");
     pa_proplist_sets(proplist, PA_PROP_MEDIA_NAME, filepath);
 
     m = pa_mainloop_new();
