@@ -14,6 +14,7 @@
 #include <assert.h>
 #include <stdarg.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
 #include <pulse/context.h>
@@ -28,6 +29,25 @@
 #include "common.h"
 
 /*
+ * Context sent to all of our asynchronous callbacks
+ */
+struct context {
+    pa_mainloop_api *mainloop_api;      /* Pulse abstract mainloop API vtable */
+    struct audio_file *file;            /* Audio file buf, size, audio specs, etc. */
+};
+
+/*
+ * Gracefully stop PA event loop before exit
+ */
+static void quit(struct context *ctx, int ret) {
+    assert(ctx->mainloop_api);
+    assert(ret == EXIT_SUCCESS || ret == EXIT_FAILURE);
+
+    ctx->mainloop_api->quit(ctx->mainloop_api, ret);
+    exit(ret);
+}
+
+/*
  * Stream state callbacks
  *
  * A 'stream' represents a data path between the client and server.
@@ -40,6 +60,9 @@
  * be moved to a different sink during its lifetime.
  */
 static void stream_state_callback(pa_stream *stream, void *userdata) {
+    struct context *ctx = userdata;
+
+    assert(ctx);
 
     switch (pa_stream_get_state(stream)) {
     case PA_STREAM_CREATING:
@@ -60,17 +83,19 @@ static void stream_state_callback(pa_stream *stream, void *userdata) {
     return;
 
 fail:
-    exit(EXIT_FAILURE);
+    quit(ctx, EXIT_FAILURE);
 }
 
 /* Callback to be called whenever new data may be written to the
  * playback data stream */
 static void stream_write_callback(pa_stream *stream, size_t length, void *userdata) {
-    struct audio_file *file = userdata;
+    struct context *ctx = userdata;
+    struct audio_file *file;
     size_t to_write, write_unit;
     int ret;
 
-    assert(file);
+    assert(ctx);
+    assert((file = ctx->file));
     assert(file->buf);
     assert(file->readi <= file->size);
 
@@ -94,13 +119,13 @@ static void stream_write_callback(pa_stream *stream, size_t length, void *userda
 
     if ((file->size - file->readi) < write_unit) {
         out("Success! - Reached end of file");
-        exit(EXIT_SUCCESS);
+        quit(ctx, EXIT_SUCCESS);
     }
 
     return;
 
 fail:
-    exit(EXIT_FAILURE);
+    quit(ctx, EXIT_FAILURE);
 }
 
 /*
@@ -111,9 +136,13 @@ fail:
  * including data streams , bi-directional commands, and events.
  */
 static void context_state_callback(pa_context *context, void *userdata) {
-    struct audio_file *file = userdata;
+    struct context *ctx = userdata;
+    struct audio_file *file;
     pa_stream *stream;
     int ret;
+
+    assert(ctx);
+    assert((file = ctx->file));
 
     switch (pa_context_get_state(context)) {
     case PA_CONTEXT_AUTHORIZING:
@@ -128,7 +157,7 @@ static void context_state_callback(pa_context *context, void *userdata) {
         if (!stream)
             goto fail;
 
-        pa_stream_set_state_callback(stream, stream_state_callback, NULL);
+        pa_stream_set_state_callback(stream, stream_state_callback, userdata);
         pa_stream_set_write_callback(stream, stream_write_callback, userdata);
 
         /* Connect this stream with a sink chosen by PulseAudio */
@@ -155,7 +184,7 @@ static void context_state_callback(pa_context *context, void *userdata) {
     return;
 
 fail:
-    exit(EXIT_FAILURE);
+    quit(ctx, EXIT_FAILURE);
 }
 
 int main(int argc, char **argv) {
@@ -163,6 +192,7 @@ int main(int argc, char **argv) {
     pa_mainloop *m = NULL;
     pa_mainloop_api *api = NULL;
     pa_context *context = NULL;
+    struct context *ctx;
     struct audio_file *file;
     char *filepath;
     int ret;
@@ -173,6 +203,14 @@ int main(int argc, char **argv) {
     }
 
     filepath = argv[1];
+
+    ctx = malloc(sizeof(struct context));
+    if (!ctx) {
+        errorp("Couldn't allocate async callbacks context");
+        goto quit;
+    }
+
+    memset(ctx, 0, sizeof(*ctx));
 
     file = audio_file_new(filepath);
     if (!file)
@@ -200,7 +238,9 @@ int main(int argc, char **argv) {
         goto quit;
     }
 
-    pa_context_set_state_callback(context, context_state_callback, file);
+    ctx->file = file;
+    ctx->mainloop_api = api;
+    pa_context_set_state_callback(context, context_state_callback, ctx);
 
     ret = pa_context_connect(context, NULL, 0, NULL);
     if (ret < 0) {

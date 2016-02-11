@@ -11,6 +11,7 @@
  * purpose of studying PulseAudio asynchronous APIs.
  */
 
+#include <assert.h>
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,22 +42,23 @@ static pa_sample_format_t bits_per_sample_to_pa_spec_format(int bits) {
     case  8: return PA_SAMPLE_U8;
     case 16: return PA_SAMPLE_S16LE;
     case 32: return PA_SAMPLE_S16BE;
-    default:
-        error("Unrecognized WAV file with %u bits per sample", bits);
-        exit(EXIT_FAILURE);
+    default: return PA_SAMPLE_INVALID;
     }
 }
 
 struct audio_file *audio_file_new(char *filepath) {
-    struct audio_file *file;
-    struct stat filestat;
-    struct wave_header *header;
+    struct audio_file *file = NULL;
+    struct stat filestat = { 0, };
+    struct wave_header *header = NULL;
+    pa_sample_format_t sample_format;
     size_t header_size;
-    int fd, ret;
+    int fd = -1, ret;
 
     file = malloc(sizeof(struct audio_file));
     if (!file)
         goto fail;
+
+    memset(file, 0, sizeof(*file));
 
     fd = open(filepath, O_RDONLY);
     if (fd < 0) {
@@ -72,12 +74,12 @@ struct audio_file *audio_file_new(char *filepath) {
 
     header_size = sizeof(struct wave_header);
     if (filestat.st_size < header_size) {
-        errorp("Too small file size < WAV header's %lu bytes", header_size);
+        error("Too small file size < WAV header %lu bytes", header_size);
         goto fail;
     }
 
     header = mmap(NULL, filestat.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-    if (!header) {
+    if (header == MAP_FAILED) {
         errorp("mmap('%s')", filepath);
         goto fail;
     }
@@ -93,15 +95,33 @@ struct audio_file *audio_file_new(char *filepath) {
         goto fail;
     }
 
+    sample_format = bits_per_sample_to_pa_spec_format(header->bits_per_sample);
+    if (sample_format == PA_SAMPLE_INVALID) {
+        error("Unrecognized WAV file format with %u bits per sample!",
+              header->bits_per_sample);
+        goto fail;
+    }
+
     file->buf = (void *)(header + 1);
     file->size = header->audio_data_size;
     file->readi = 0;
-    file->spec.format = bits_per_sample_to_pa_spec_format(header->bits_per_sample);
+    file->spec.format = sample_format;
     file->spec.rate = header->frequency;
     file->spec.channels = header->channels;
 
     return file;
 
 fail:
-    exit(EXIT_FAILURE);
+    if (header && header != MAP_FAILED) {
+        assert(filestat.st_size > 0);
+        munmap(header, filestat.st_size);
+    }
+
+    if (fd != -1)
+        close(fd);
+
+    if (file)
+        free(file);
+
+    return NULL;
 }
